@@ -10,7 +10,7 @@ from . import config as C
 
 CSS = f"""
 <style>
-.block-container {{padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1350px;}}
+.block-container {{padding-top: 3.6rem; padding-bottom: 3rem; max-width: 1350px;}}
 h1, h2, h3, h4 {{color: {C.NAVY}; letter-spacing: -0.01em;}}
 h1 {{font-size: 2.0rem !important; padding-bottom: 0.6rem !important;}}
 h3 {{font-size: 1.2rem !important;}}

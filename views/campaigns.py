@@ -39,7 +39,10 @@ def colour_state(v):
 fmt = {"Budget": "₹{:,.0f}", "Spent": "₹{:,.0f}", "Uncommitted": "₹{:,.0f}", "Registrations": "{:,.0f}", "Confirmed": "{:,.0f}",
        "Pace vs plan": "{:.2f}×", "Projected attendees": "{:,.0f}", "Plan attendees": "{:,.0f}", "₹ / registration": "₹{:,.0f}",
        "₹ / projected attendee": "₹{:,.0f}"}
-st.dataframe(df.style.format(fmt, na_rep="—").map(colour_state, subset=["Recommended action"]), hide_index=True, width="stretch")
+show_df = df.copy()
+for _col, _f in fmt.items():   # format to text so empty cells show a dash instead of "None"
+    show_df[_col] = [("—" if pd.isna(v) else _f.format(v)) for v in df[_col]]
+st.dataframe(show_df.style.map(colour_state, subset=["Recommended action"]), hide_index=True, width="stretch")
 st.caption("Pace = registrations to date ÷ time-aligned plan. Projected attendees = projected confirmed × P(attend | confirmed). "
            "₹ / projected attendee uses the full allocation. Recommended action is computed by the decision engine from current data.")
 

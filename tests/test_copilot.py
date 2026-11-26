@@ -84,3 +84,79 @@ def test_model_loop_executes_tools_and_returns_grounded_text():
 def test_without_api_key_the_copilot_says_so():
     res = ai.ask("hello", [], 4)
     assert res["text"] is None and "not configured" in res["error"]
+
+
+class _FailingModels:
+    def __init__(self):
+        self.tried = []
+
+    def generate_content(self, model, contents, config):
+        self.tried.append((model, config.thinking_config is not None))
+        raise RuntimeError("400 INVALID_ARGUMENT: example failure")
+
+
+class _FailingClient:
+    def __init__(self):
+        self.models = _FailingModels()
+
+
+def test_all_models_failing_reports_every_attempt_and_first_error():
+    client = _FailingClient()
+    res = ai.ask("hello", [], 4, client=client)
+    assert res["text"] is None and "First error" in res["error"] and "gemini-3.8-flash" in res["error"]
+    assert client.models.tried == [("gemini-3.8-flash", True), ("gemini-3.8-flash", False), ("gemini-3.6-flash", True), ("gemini-3.6-flash", False)]
+    assert len(res["details"]) == 4 and res["pending_task"] is None
+
+
+def test_no_argument_tools_have_no_parameter_schema():
+    by = {d["name"]: d for d in ai.DECLARATIONS}
+    assert "parameters" not in by["get_dashboard_summary"] and "parameters" not in by["get_budget_availability"]
+    assert by["compare_campaigns"]["parameters"]["required"] == ["campaign_a", "campaign_b"]
+    assert "required" not in by["get_campaign_metrics"]["parameters"]
+
+
+class _NoModel:
+    """A client whose configured models 404 but which can list usable ones."""
+
+    class _Models:
+        def __init__(self):
+            self.calls = []
+
+        def generate_content(self, model, contents, config):
+            self.calls.append(model)
+            if model != "gemini-9.9-flash":
+                raise RuntimeError(f"404 NOT_FOUND: models/{model} is no longer available to new users")
+            return types.GenerateContentResponse(candidates=[types.Candidate(
+                content=types.Content(role="model", parts=[types.Part(text="Answered with a discovered model.")]))])
+
+        def list(self):
+            mk = lambda n: types.Model(name=f"models/{n}", supported_actions=["generateContent"])
+            return [mk("embedding-001"), mk("gemini-9.9-pro"), mk("gemini-9.9-flash"), mk("gemini-9.9-flash-lite")]
+
+    def __init__(self):
+        self.models = self._Models()
+
+
+def test_falls_back_to_a_model_the_key_can_actually_use():
+    ai._discovered = []
+    client = _NoModel()
+    res = ai.ask("Are we on track?", [], 4, client=client)
+    assert res["error"] is None and res["model"] == "gemini-9.9-flash"
+    assert client.models.calls[0] in ai.DEFAULT_MODELS            # configured names are tried first
+    assert ai.available_models(client)[0] == "gemini-9.9-flash"   # flash before pro, lite after flash
+    assert "embedding-001" not in ai.available_models(client)
+
+
+def test_unusable_key_explains_what_is_available():
+    ai._discovered = []
+
+    class _Dead(_NoModel):
+        class _Models(_NoModel._Models):
+            def generate_content(self, model, contents, config):
+                raise RuntimeError(f"404 NOT_FOUND: models/{model} not found")
+
+        def __init__(self):
+            self.models = self._Models()
+
+    res = ai.ask("hi", [], 4, client=_Dead())
+    assert res["text"] is None and "gemini-9.9-flash" in res["error"] and "GEMINI_MODEL" in res["error"]

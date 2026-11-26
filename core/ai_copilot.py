@@ -10,6 +10,7 @@ in the UI. No model-generated code or SQL is ever executed.
 from __future__ import annotations
 
 import json
+import time
 from datetime import date
 
 from . import analytics as an
@@ -18,7 +19,7 @@ from . import database as db
 from . import forecasting as fc
 from . import historical as hist
 
-DEFAULT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash"]
+DEFAULT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash"]
 MAX_TOOL_ROUNDS = 8
 
 SYSTEM_INSTRUCTION = """You are the CampusFest AI Growth Analyst and Copilot. Your objective is to maximize unique, verified external attendees within the festival's approved budget.
@@ -74,7 +75,8 @@ class Toolbox:
 
     # -- helpers -------------------------------------------------------
     def _ctx(self):
-        return an.build_context(self.week, db.load_all(force=True))
+        # Every write clears the cache, so this is always the latest saved state without re-reading the database per tool call.
+        return an.build_context(self.week, db.load_all())
 
     @staticmethod
     def _find(ctx, name: str):
@@ -201,7 +203,7 @@ class Toolbox:
 
     def simulate_scenario(self, campaign: str = "", registrations_to_date: int = -1, show_up_engine_active: bool = True,
                           expected_walkins: int = -1, guest_redemption_rate: float = -1.0, reminder_lift: float = -1.0) -> dict:
-        state = db.load_all(force=True)
+        state = db.load_all()
         base = an.build_context(self.week, state)
         sim_state = {**state, "campaigns": [dict(c) for c in state["campaigns"]], "campaign_metrics": [dict(m) for m in state["campaign_metrics"]],
                      "settings": dict(state["settings"])}
@@ -310,7 +312,12 @@ _ARR = {"type": "array", "items": {"type": "string"}}
 
 
 def _decl(name, desc, props=None, required=None):
-    return {"name": name, "description": desc, "parameters": {"type": "object", "properties": props or {}, "required": required or []}}
+    d = {"name": name, "description": desc}
+    if props:                                    # tools without arguments carry no parameter schema at all
+        d["parameters"] = {"type": "object", "properties": props}
+        if required:
+            d["parameters"]["required"] = required
+    return d
 
 
 DECLARATIONS = [
@@ -374,14 +381,63 @@ def model_candidates() -> list:
     return ([str(chosen)] if chosen else []) + [m for m in DEFAULT_MODELS if m != chosen]
 
 
+_discovered: list = []
+
+
+def available_models(client) -> list:
+    """Ask the API which text models this key may actually call (cached per process).
+
+    Model availability differs from key to key and changes over time, so the app never
+    depends on a hard-coded name alone: if every configured candidate is rejected, it
+    picks a usable model from this list instead of failing.
+    """
+    global _discovered
+    if _discovered:
+        return _discovered
+    out = []
+    try:
+        for m in client.models.list():
+            name = (getattr(m, "name", "") or "").split("/")[-1]
+            actions = getattr(m, "supported_actions", None) or []
+            if not name or (actions and "generateContent" not in actions):
+                continue
+            low = name.lower()
+            if any(w in low for w in ("embedding", "aqa", "imagen", "veo", "tts", "image", "audio", "live",
+                                      "native", "learnlm", "gemma", "robotics", "computer-use")):
+                continue
+            out.append(name)
+    except Exception as e:
+        print(f"[copilot] could not list models: {type(e).__name__}", flush=True)
+        return []
+
+    def rank(n: str):
+        low = n.lower()
+        ver = 0.0
+        for part in low.replace("gemini-", "").split("-"):
+            try:
+                ver = float(part)
+                break
+            except ValueError:
+                continue
+        return (0 if ("flash" in low and "lite" not in low) else 1 if "flash" in low else 2,
+                1 if any(w in low for w in ("preview", "exp", "thinking", "latest")) else 0,
+                -ver, len(n))
+
+    _discovered = sorted(out, key=rank)
+    print(f"[copilot] models available to this key: {', '.join(_discovered[:8])}", flush=True)
+    return _discovered
+
+
 def _friendly_error(e: Exception) -> str:
     msg = str(e)
     low = msg.lower()
     if "429" in msg or "resource_exhausted" in low or "quota" in low:
         return "The AI model's rate limit or free quota has been reached. Please wait a minute and try again."
+    if "timeout" in low or "timed out" in low or "deadline" in low:
+        return "The AI model took too long to respond. Please try again; shorter, more specific questions are faster."
     if "api key" in low or "api_key" in low or "401" in msg or "403" in msg or "permission" in low:
         return "The AI model rejected the API key. Check GEMINI_API_KEY in the app secrets."
-    return f"The AI model could not be reached ({type(e).__name__}). Please try again. Details: {msg[:300]}"
+    return f"The AI model could not answer. Please try again. First error: {msg[:400]}"
 
 
 def ask(question: str, history: list, week: int, client=None) -> dict:
@@ -393,33 +449,67 @@ def ask(question: str, history: list, week: int, client=None) -> dict:
     if client is None:
         key = db.get_secret("GEMINI_API_KEY")
         if not key:
-            return {"text": None, "error": "The AI model is not configured (GEMINI_API_KEY is missing).", "calls": [], "pending_task": None, "model": None}
-        client = genai.Client(api_key=str(key).strip())
+            return {"text": None, "error": "The AI model is not configured (GEMINI_API_KEY is missing).", "calls": [], "pending_task": None, "model": None, "details": []}
+        client = genai.Client(api_key=str(key).strip(), http_options=types.HttpOptions(timeout=75_000))
+    db.load_all(force=True)  # one fresh read from the database per question
     names = [c["name"] for c in an.build_context(week)["campaigns"]]
     system = (SYSTEM_INSTRUCTION + f"\nCurrent simulated campaign week: {week} of {C.TOTAL_WEEKS} ({C.week_start(week)} to {C.week_end(week)}). "
               f"Campaign start {C.CAMPAIGN_START}; festival {C.FEST_DATES}.\nCampaigns: {', '.join(names)}.\nTask owners: {', '.join(C.OWNERS)}.")
-    config = types.GenerateContentConfig(
-        system_instruction=system, temperature=0.2,
-        tools=[types.Tool(function_declarations=DECLARATIONS)],
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
+    def make_config(fast: bool):
+        return types.GenerateContentConfig(
+            system_instruction=system, temperature=0.2,
+            tools=[types.Tool(function_declarations=DECLARATIONS)],
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            thinking_config=types.ThinkingConfig(thinking_level="low") if fast else None)
     contents = []
     for h in history[-12:]:
         if h.get("content"):
             contents.append(types.Content(role="user" if h["role"] == "user" else "model", parts=[types.Part(text=str(h["content"])[:6000])]))
     contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
 
-    models, used, last_err = model_candidates(), None, None
-    for model in models:
-        try:
-            text = _converse(client, types, model, contents, config, box)
-            used = model
-            return {"text": text, "error": None, "calls": box.calls, "pending_task": box.pending_task, "model": used}
-        except Exception as e:
-            last_err = e
-            low = str(e).lower()
-            if not ("404" in low or "not found" in low or "not supported" in low or "unavailable" in low or "limiting access" in low):
-                break
-    return {"text": None, "error": _friendly_error(last_err), "calls": box.calls, "pending_task": box.pending_task, "model": used}
+    errors, queue, tried, discovered_added = [], list(model_candidates()), set(), False
+    while queue:
+        model = queue.pop(0)
+        if model in tried:
+            continue
+        tried.add(model)
+        # Gemini 3 models accept a low thinking level (faster answers); if a model rejects it, retry without.
+        variants = [True, False] if model.startswith("gemini-3") else [False]
+        attempt = 0
+        while variants:
+            fast = variants.pop(0)
+            attempt += 1
+            try:
+                box.calls.clear()
+                box.pending_task = None
+                text = _converse(client, types, model, contents, make_config(fast), box)
+                return {"text": text, "error": None, "calls": box.calls, "pending_task": box.pending_task, "model": model, "details": errors}
+            except Exception as e:
+                msg = f"{type(e).__name__}: {str(e)[:600]}"
+                errors.append(f"{model}{' (low thinking)' if fast else ''}: {msg}")
+                print(f"[copilot] {errors[-1]}", flush=True)       # visible in the hosting logs; never contains the API key
+                low = msg.lower()
+                if ("503" in low or "overloaded" in low or "unavailable" in low) and attempt <= 2:
+                    time.sleep(3)                                   # busy model: one more try with the same settings
+                    variants.insert(0, fast)
+                    continue
+                if not (fast and ("thinking" in low or "invalid_argument" in low or "400" in low)):
+                    break                                           # move on to the next model
+        if not queue and not discovered_added:
+            # Every configured name was rejected. Ask the API which models this key can use.
+            discovered_added = True
+            queue = [m for m in available_models(client) if m not in tried][:3]
+            if queue:
+                errors.append("Falling back to models reported as available for this key: " + ", ".join(queue))
+    avail = available_models(client)
+    if avail:
+        errors.append("Models this key reports as available: " + ", ".join(avail[:10]))
+    message = _friendly_error(Exception(errors[0] if errors else "unknown error"))
+    if tried:
+        message += f" Tried: {', '.join(sorted(tried))}."
+        message += (f" Models this key can use include: {', '.join(avail[:5])}. Set GEMINI_MODEL in the app secrets to one of them."
+                    if avail else " The key could not list any usable model either, so it may be restricted or from another project.")
+    return {"text": None, "error": message, "calls": box.calls, "pending_task": None, "model": None, "details": errors}
 
 
 def _converse(client, types, model, contents, config, box) -> str:

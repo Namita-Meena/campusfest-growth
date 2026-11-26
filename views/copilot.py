@@ -25,6 +25,21 @@ if not ai.is_configured():
         name = st.selectbox("Tool", [n for n in ai.TOOL_NAMES if n not in ("draft_task", "compare_campaigns", "two_proportion_test", "query_historical_data")])
         st.json(ai.run_tool(box, name, {}), expanded=1)
 
+else:
+    with st.expander("AI connection check"):
+        st.caption("The app tries its configured models first and, if the key cannot use any of them, falls back to a model this key "
+                   "reports as available. Use this check if answers fail, then set GEMINI_MODEL in the app secrets to pin one.")
+        if st.button("Check which models this API key can use"):
+            from google import genai
+            try:
+                client = genai.Client(api_key=str(ai.db.get_secret("GEMINI_API_KEY")).strip())
+                ai._discovered = []
+                found = ai.available_models(client)
+                st.success(f"Configured order: {', '.join(ai.model_candidates())}") if found else None
+                st.write("Models available to this key (best first):", found or "none returned")
+            except Exception as e:
+                st.error(f"Could not reach the API: {type(e).__name__}: {e}")
+
 SUGGESTIONS = ["Are we on track for the base target? What is the biggest risk?",
                "Why is Club Contingent League performing the way it is, and what should we do?",
                "How much money can we actually reallocate right now?",
@@ -40,6 +55,10 @@ for i, m in enumerate(chat):
                     st.markdown(f"- `{c['tool']}` {json.dumps(c['args']) if c['args'] else ''} {'✓' if c['ok'] else '— returned an error'}")
                 if m.get("model"):
                     st.caption(f"Model: {m['model']} · simulated week {m.get('week')}")
+        if m.get("details"):
+            with st.expander("Technical details (which models were tried)"):
+                for d_ in m["details"]:
+                    st.code(d_, language=None, wrap_lines=True)
 
 pending = st.session_state.get("pending_task")
 if pending:
@@ -97,7 +116,7 @@ if question:
         chat.append({"role": "user", "content": question})
         if res["error"]:
             st.error(res["error"])
-            chat.append({"role": "assistant", "content": f"_{res['error']}_", "calls": res["calls"]})
+            chat.append({"role": "assistant", "content": f"_{res['error']}_", "calls": res["calls"], "details": res.get("details")})
         else:
             chat.append({"role": "assistant", "content": res["text"], "calls": res["calls"], "model": res["model"], "week": W})
             if res["pending_task"]:

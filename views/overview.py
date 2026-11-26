@@ -50,10 +50,10 @@ with c1:
     fig = go.Figure()
     for name, val, col in parts:
         fig.add_bar(y=["Forecast"], x=[val], name=name, orientation="h", marker_color=col, text=[f"{val:,}"], textposition="inside")
-    for label, val, col, pos in (("Base", f["base_target"], C.NAVY, "top right"), ("Stretch", f["stretch_target"], C.ORANGE, "top left"),
+    for label, val, col, pos in (("Base", f["base_target"], C.NAVY, "top left"), ("Stretch", f["stretch_target"], C.ORANGE, "top right"),
                                  ("2025 actual", 2050, C.GREY, "bottom left")):
         fig.add_vline(x=val, line_color=col, line_dash="dash", annotation_text=f"{label} {val:,}", annotation_position=pos)
-    fig.update_layout(barmode="stack", xaxis_range=[0, max(f["stretch_target"], f["expected_attendance"]) * 1.15], bargap=0.55)
+    fig.update_layout(barmode="stack", xaxis_range=[0, max(f["stretch_target"], f["expected_attendance"]) * 1.32], bargap=0.55)
     fig = ui.style(fig, 260)
     fig.update_layout(legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="left", x=0), margin=dict(t=30, b=10))
     ui.show(fig, "fc_vs_target")
