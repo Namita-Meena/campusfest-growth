@@ -35,8 +35,17 @@ else:
                 client = genai.Client(api_key=str(ai.db.get_secret("GEMINI_API_KEY")).strip())
                 ai._discovered = []
                 found = ai.available_models(client)
-                st.success(f"Configured order: {', '.join(ai.model_candidates())}") if found else None
-                st.write("Models available to this key (best first):", found or "none returned")
+                st.markdown(f"**Configured order:** {', '.join(ai.model_candidates())}")
+                if found:
+                    usable = [m for m in ai.model_candidates() if m in found]
+                    if usable:
+                        st.success(f"This key can use {usable[0]}, which the app will try first.")
+                    else:
+                        st.warning(f"None of the configured models is in this key's list. The app will fall back to {found[0]}. "
+                                   f"To pin it, add GEMINI_MODEL = \"{found[0]}\" to the app secrets.")
+                    st.markdown("**Available to this key (best first):** " + ", ".join(found[:12]))
+                else:
+                    st.warning("The key returned no usable text model. It may be restricted or from another project.")
             except Exception as e:
                 st.error(f"Could not reach the API: {type(e).__name__}: {e}")
 
@@ -97,6 +106,13 @@ if pending:
             chat.append({"role": "assistant", "content": "The task draft was rejected. Nothing was saved."})
             st.rerun()
 
+retry_q = st.session_state.get("last_question")
+if retry_q and chat and chat[-1]["role"] == "assistant" and chat[-1]["content"].startswith("_"):
+    if st.button("Ask the same question again", type="primary"):
+        st.session_state["queued_question"] = retry_q
+        st.session_state.pop("last_question", None)
+        st.rerun()
+
 if not chat:
     st.caption("Try one of these, or type your own question:")
     for n_, q in enumerate(SUGGESTIONS):
@@ -111,11 +127,23 @@ if question:
     with st.chat_message("user", avatar=":material/person:"):
         st.markdown(question)
     with st.chat_message("assistant", avatar=":material/smart_toy:"):
+        live, shown = st.empty(), []
+
+        def on_text(delta):
+            """Show the answer as it is written. delta None means a failed attempt: clear it."""
+            if delta is None:
+                shown.clear()
+            else:
+                shown.append(delta)
+            live.markdown("".join(shown) or "")
+
         with st.spinner("Retrieving current data and analysing…"):
-            res = ai.ask(question, [{"role": m["role"], "content": m["content"]} for m in chat], W)
+            res = ai.ask(question, [{"role": m["role"], "content": m["content"]} for m in chat], W, on_text=on_text)
+        live.empty()
         chat.append({"role": "user", "content": question})
         if res["error"]:
             st.error(res["error"])
+            st.session_state["last_question"] = question
             chat.append({"role": "assistant", "content": f"_{res['error']}_", "calls": res["calls"], "details": res.get("details")})
         else:
             chat.append({"role": "assistant", "content": res["text"], "calls": res["calls"], "model": res["model"], "week": W})

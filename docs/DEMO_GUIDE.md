@@ -1,5 +1,7 @@
 # Recruiter demo guide (about 5 minutes)
 
+The sidebar has a **Theme** switch (Dark / Light). It changes every page at once; use whichever reads better on your screen. The steps below are the same in both.
+
 The sidebar shows **Simulated campaign week 4**. If someone has changed the data, open **Demo workspace → tick the box → Reset demo workspace**.
 
 1. **Growth Overview.** Forecast vs the 2,600 base and 3,400 stretch targets, alerts, weekly pace, budget.

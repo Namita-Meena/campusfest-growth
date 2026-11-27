@@ -32,8 +32,8 @@ for _col in ("Registrations", "Confirmed", "Pace vs plan", "Projected attendees"
 
 
 def colour_state(v):
-    col = C.STATE_COLOURS.get(v)
-    return f"color: {col}; font-weight: 600" if col else ""
+    name = C.STATE_TONES.get(v)
+    return f"color: {ui.grid_tone(name)}; font-weight: 600" if name else ""
 
 
 fmt = {"Budget": "₹{:,.0f}", "Spent": "₹{:,.0f}", "Uncommitted": "₹{:,.0f}", "Registrations": "{:,.0f}", "Confirmed": "{:,.0f}",
@@ -96,9 +96,9 @@ with right:
         wk.sort(key=lambda m: m["week"])
         fig = go.Figure()
         fig.add_bar(x=[m["week"] for m in wk if m["week"] <= ctx["data_week"]], y=[m["registrations"] for m in wk if m["week"] <= ctx["data_week"]],
-                    name="Registrations", marker_color=C.BLUE)
+                    name="Registrations", marker_color=ui.P().primary)
         fig.add_scatter(x=list(range(1, 13)), y=[p["plan_final_registrations"] * (an.fc.curve_share(w, c["start_week"]) - an.fc.curve_share(w - 1, c["start_week"]))
-                                                 for w in range(1, 13)], name="Plan", line=dict(color=C.ORANGE, dash="dash"))
+                                                 for w in range(1, 13)], name="Plan", line=dict(color=ui.P().second, dash="dash"))
         fig.update_xaxes(dtick=1, title="Week")
         ui.show(ui.style(fig, 230), "camp_week")
 

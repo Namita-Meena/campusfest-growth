@@ -18,12 +18,38 @@ CAMPAIGN_START = date(2026, 11, 30)  # Monday of campaign week 1
 TOTAL_WEEKS = 12
 SEEDED_WEEKS = 8                     # simulated weekly data exists for weeks 1-8
 
-# Colours (also set in .streamlit/config.toml)
-NAVY, BLUE, ORANGE = "#14243C", "#2459D3", "#C65D28"
-GREEN, AMBER, RED, GREY = "#2E7D4F", "#B7791F", "#B83232", "#7A8394"
-PAPER, LINE = "#F7F6F2", "#E2DED3"
+# ---------------------------------------------------------------- themes
+# Two complete visual themes share one layout. The reader switches between them with the
+# Dark / Light control in the sidebar; the choice is held in the session and applies to every page.
+#   dark  - "console": near-black canvas, fine grid, lime accent, monospace labels.
+#   light - "editorial": warm paper, ink-black rules, oversized figures, one burnt-orange accent.
+# Every text colour below reaches at least 4.5:1 on its own background (WCAG AA). Fill-only colours
+# (bars, meters) reach at least 3:1. Status is always written as a word as well as shown as a colour.
+THEME_NAMES = {"dark": "Dark", "light": "Light"}
+DEFAULT_THEME = "dark"
+THEMES = {
+    "dark": dict(
+        bg="#08090B", panel="#0B0D10", field="#101216", line="#1C1F24", line2="#343A44", grid="#0E1013",
+        text="#E8EAED", text2="#C3C8CF", muted="#8A9099", faint="#7A828E",
+        accent="#C8F751", accent_text="#C8F751", on_accent="#08090B",
+        green="#C8F751", amber="#FF9B57", red="#FF6B6B", grey="#8A9099", blue="#7AA2FF",
+        primary="#C8F751", second="#FF9B57", ink="#E8EAED", strong="#5F6977", lead="#C8F751", done="#1F7A4D",
+        soft="#3A414C", track="#1C1F24",
+        side_bg="#0B0C0E", side_line="#1C1F24", side_text="#E8EAED", side_muted="#8A9099", side_faint="#7A828E",
+        side_active="#14161A", side_accent="#C8F751"),
+    "light": dict(
+        bg="#FBF8F3", panel="#FFFFFF", field="#FFFFFF", line="#DDD6CB", line2="#B9B0A3", grid="#FBF8F3",
+        text="#14120F", text2="#4A443D", muted="#6B635B", faint="#6B635B",
+        accent="#E8502E", accent_text="#C93B19", on_accent="#FFFFFF",
+        green="#2E7D4F", amber="#C93B19", red="#8F0E14", grey="#6B635B", blue="#1F4FBF",
+        primary="#E8502E", second="#14120F", ink="#14120F", strong="#14120F", lead="#14120F", done="#14120F",
+        soft="#D5CCBE", track="#EDE7DD",
+        side_bg="#14120F", side_line="#2A2622", side_text="#F3EFE8", side_muted="#9A938A", side_faint="#8C857C",
+        side_active="#14120F", side_accent="#E8502E"),
+}
 
-STATE_COLOURS = {"Scale": GREEN, "Change / Fix": AMBER, "Stop": RED, "Continue Monitoring": GREY}
+# Decision states map to a tone name; the active theme supplies the actual colour.
+STATE_TONES = {"Scale": "green", "Change / Fix": "amber", "Stop": "red", "Continue Monitoring": "grey"}
 OWNERS = ["Meera Iyer", "Arjun Verma", "Nisha Rao", "Dev Malhotra", "Namita Meena"]
 CAMPAIGN_STATUSES = ["Planned", "Active", "Paused", "Stopped", "Archived"]
 TASK_STATUSES = ["To Do", "In Progress", "Blocked", "Completed"]

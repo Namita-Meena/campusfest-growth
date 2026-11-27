@@ -19,7 +19,11 @@ from . import database as db
 from . import forecasting as fc
 from . import historical as hist
 
-DEFAULT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash"]
+DEFAULT_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
+TOTAL_BUDGET_SECONDS = 80          # hard limit on one question, so the page never hangs
+TRANSIENT = ("503", "504", "429", "500", "unavailable", "overloaded", "high demand", "deadline",
+             "timeout", "timed out", "internal error", "try again")
+PERMANENT = ("404", "not found", "no longer available", "permission denied", "401", "403", "api key")
 MAX_TOOL_ROUNDS = 8
 
 SYSTEM_INSTRUCTION = """You are the CampusFest AI Growth Analyst and Copilot. Your objective is to maximize unique, verified external attendees within the festival's approved budget.
@@ -50,7 +54,7 @@ Be concise, professional, analytical and action-oriented.
 
 Operating rules for this application:
 - CampusFest Bengaluru 2027 (20-21 Feb 2027) is a planning scenario. Live campaign numbers are SIMULATED for a selected campaign week; the 2025 dataset is the only observed history. Say which one you are quoting.
-- Always call a tool before quoting any number, even if you saw it earlier in the conversation: data may have been edited since. Never do arithmetic in your head when a tool can return the figure; for a significance test call two_proportion_test.
+- A SNAPSHOT of the current state is appended below. It was read from the database the moment this question arrived, so you may quote its figures directly and answer at once. For anything it does not contain (history, per-campaign detail, experiment inputs, budgets by campaign, tasks, scenarios), call a tool. Never quote a number from an earlier turn in the conversation: it may be out of date. Never do arithmetic in your head when a tool can return the figure; for a significance test call two_proportion_test.
 - Every tool reads the latest saved data. Quote numbers exactly as returned, with units. Use the Indian rupee sign.
 - Recommendations (Scale, Change / Fix, Stop, Continue Monitoring) come from get_experiment_decisions and get_campaign_metrics. Report the rule, the threshold, the sample check and the action; do not invent a different verdict. If you disagree, say so separately and explain why.
 - Money can only move from uncommitted budget (allocation minus spend minus open commitments). Use get_budget_availability; never propose moving more than is uncommitted, and never count the reserve twice.
@@ -382,6 +386,8 @@ def model_candidates() -> list:
 
 
 _discovered: list = []
+_last_good: str = ""        # model that answered most recently: tried first next time
+_dead: set = set()          # models this key cannot use at all (404 / permission), skipped from then on
 
 
 def available_models(client) -> list:
@@ -440,7 +446,37 @@ def _friendly_error(e: Exception) -> str:
     return f"The AI model could not answer. Please try again. First error: {msg[:400]}"
 
 
-def ask(question: str, history: list, week: int, client=None) -> dict:
+def snapshot_text(week: int) -> str:
+    """A compact, current picture of the campaign, so simple questions need no tool call."""
+    ctx = an.build_context(week, db.load_all())
+    f, b, t = ctx["forecast"], ctx["budget"], ctx["totals"]
+    lines = [
+        f"SNAPSHOT (simulated 2027 data, read from the database for this question; campaign week {ctx['week']} of {C.TOTAL_WEEKS}, {ctx['week_dates']}):",
+        f"Targets: base {f['base_target']:,}, stretch {f['stretch_target']:,} verified attendees. 2025 actual was 2,050.",
+        f"Forecast {f['expected_attendance']:,} ({f['pct_of_base']}% of base; {f['gap_to_base']:+,} vs base, {f['gap_to_stretch']:+,} vs stretch) "
+        f"= {f['registered_attendees']:,} registered attendees + {f['expected_walkins']:,} walk-ins + {f['expected_new_guests']:,} new Day-2 guests.",
+        f"To date: {t['registrations']:,} registrations (time-aligned plan {t['plan_registrations_to_date']:,}), {t['confirmed']:,} confirmed, "
+        f"{t['leads']:,} leads, {t['reg_starts']:,} registration starts. Projected final registrations {f['projected_final_registrations']:,}.",
+        f"Budget: approved Rs {b['approved_budget']:,}, allocated Rs {b['allocated']:,}, spent Rs {b['spent_to_date']:,}, "
+        f"open commitments Rs {b['open_commitments']:,}, uncommitted Rs {b['uncommitted']:,}, of which reserve Rs {b['reserve_uncommitted']:,}.",
+        "Campaigns (registrations | pace vs plan | projected attendees | uncommitted | recommendation):",
+    ]
+    for c in ctx["campaigns"]:
+        p, r = c["projection"], c["recommendation"]
+        pace = f"{p['pace_vs_plan']:.2f}x" if p and p["pace_vs_plan"] is not None else "n/a"
+        proj = f"{p['projected_attendees']:,.0f}" if p else "n/a"
+        regs = f"{c['registrations']:,}" if p else "n/a (not an acquisition campaign)"
+        lines.append(f"- {c['name']}: {regs} | {pace} | {proj} | Rs {c['uncommitted']:,} | {r['state'] if r else 'no rule'}")
+    lines.append("Experiment decisions: " + "; ".join(f"{C.EXPERIMENT_NAMES[k].split(':')[0]} = {d['state']}" for k, d in ctx["decisions"].items())
+                 + f". Week-6 guardrail = {ctx['guardrail']['state']}.")
+    open_t = [x for x in ctx["tasks"] if x["status"] != "Completed"]
+    lines.append(f"Tasks: {len(open_t)} open, {len(ctx['tasks']) - len(open_t)} completed. Decisions logged: {len(ctx['decision_logs'])}.")
+    if ctx["alerts"]:
+        lines.append("Alerts: " + " | ".join(txt for _, txt in ctx["alerts"][:5]))
+    return "\n".join(lines)
+
+
+def ask(question: str, history: list, week: int, client=None, on_text=None) -> dict:
     """Answer one question. history: [{'role': 'user'|'assistant', 'content': str}, ...] of earlier turns."""
     from google import genai
     from google.genai import types
@@ -454,7 +490,8 @@ def ask(question: str, history: list, week: int, client=None) -> dict:
     db.load_all(force=True)  # one fresh read from the database per question
     names = [c["name"] for c in an.build_context(week)["campaigns"]]
     system = (SYSTEM_INSTRUCTION + f"\nCurrent simulated campaign week: {week} of {C.TOTAL_WEEKS} ({C.week_start(week)} to {C.week_end(week)}). "
-              f"Campaign start {C.CAMPAIGN_START}; festival {C.FEST_DATES}.\nCampaigns: {', '.join(names)}.\nTask owners: {', '.join(C.OWNERS)}.")
+              f"Campaign start {C.CAMPAIGN_START}; festival {C.FEST_DATES}.\nCampaigns: {', '.join(names)}.\nTask owners: {', '.join(C.OWNERS)}."
+              f"\n\n{snapshot_text(week)}")
     def make_config(fast: bool):
         return types.GenerateContentConfig(
             system_instruction=system, temperature=0.2,
@@ -467,70 +504,142 @@ def ask(question: str, history: list, week: int, client=None) -> dict:
             contents.append(types.Content(role="user" if h["role"] == "user" else "model", parts=[types.Part(text=str(h["content"])[:6000])]))
     contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
 
-    errors, queue, tried, discovered_added = [], list(model_candidates()), set(), False
-    while queue:
-        model = queue.pop(0)
-        if model in tried:
-            continue
-        tried.add(model)
-        # Gemini 3 models accept a low thinking level (faster answers); if a model rejects it, retry without.
-        variants = [True, False] if model.startswith("gemini-3") else [False]
-        attempt = 0
-        while variants:
-            fast = variants.pop(0)
-            attempt += 1
+    global _last_good
+
+    def attempt(model: str) -> str:
+        """One model, one answer. Retries once without the low thinking level if the model rejects it."""
+        for fast in ((True, False) if model.startswith("gemini-3") else (False,)):
             try:
                 box.calls.clear()
                 box.pending_task = None
-                text = _converse(client, types, model, contents, make_config(fast), box)
-                return {"text": text, "error": None, "calls": box.calls, "pending_task": box.pending_task, "model": model, "details": errors}
+                if on_text is not None:
+                    on_text(None)                      # None clears anything already shown for a failed attempt
+                return _converse(client, types, model, contents, make_config(fast), box, on_text)
             except Exception as e:
-                msg = f"{type(e).__name__}: {str(e)[:600]}"
-                errors.append(f"{model}{' (low thinking)' if fast else ''}: {msg}")
-                print(f"[copilot] {errors[-1]}", flush=True)       # visible in the hosting logs; never contains the API key
+                low = f"{type(e).__name__}: {e}".lower()
+                if fast and ("thinking" in low or "invalid_argument" in low or "400" in low):
+                    continue                                   # this model dislikes the thinking level: plain retry
+                raise
+        raise RuntimeError("no attempt was made")
+
+    errors, deadline = [], time.monotonic() + TOTAL_BUDGET_SECONDS
+    candidates = [m for m in ([_last_good] + model_candidates()) if m and m not in _dead]
+    seen, ordered = set(), []
+    for m in candidates:
+        if m not in seen:
+            seen.add(m)
+            ordered.append(m)
+    if not ordered:                       # everything was marked unusable earlier: start clean
+        _dead.clear()
+        ordered = list(model_candidates())
+        seen = set(ordered)
+    all_transient, discovered_added, busy = True, False, set()
+
+    def run(queue: list, allow_discovery: bool):
+        """Try each model once, in order. Returns an answer dict, or None if they all failed."""
+        nonlocal all_transient, discovered_added
+        while queue:
+            model = queue.pop(0)
+            if model in _dead or time.monotonic() > deadline:
+                if time.monotonic() > deadline:
+                    errors.append(f"Stopped after {TOTAL_BUDGET_SECONDS} seconds so the page would not hang.")
+                    return None
+                continue
+            try:
+                text = attempt(model)
+                return {"text": text, "error": None, "calls": box.calls, "pending_task": box.pending_task,
+                        "model": model, "details": errors}
+            except Exception as e:
+                msg = f"{type(e).__name__}: {str(e)[:400]}"
                 low = msg.lower()
-                if ("503" in low or "overloaded" in low or "unavailable" in low) and attempt <= 2:
-                    time.sleep(3)                                   # busy model: one more try with the same settings
-                    variants.insert(0, fast)
-                    continue
-                if not (fast and ("thinking" in low or "invalid_argument" in low or "400" in low)):
-                    break                                           # move on to the next model
-        if not queue and not discovered_added:
-            # Every configured name was rejected. Ask the API which models this key can use.
-            discovered_added = True
-            queue = [m for m in available_models(client) if m not in tried][:3]
-            if queue:
-                errors.append("Falling back to models reported as available for this key: " + ", ".join(queue))
+                errors.append(f"{model}: {msg}")
+                print(f"[copilot] {errors[-1]}", flush=True)     # visible in the hosting logs; never contains the API key
+                transient = any(w in low for w in TRANSIENT)
+                if transient:
+                    busy.add(model)                              # worth one more try once the spike passes
+                else:
+                    all_transient = False                        # a real bug, not a busy service
+                    if any(w in low for w in PERMANENT):
+                        _dead.add(model)                         # this key can never use it: stop trying
+            if not queue and allow_discovery and not discovered_added:
+                discovered_added = True
+                extra = [m for m in available_models(client) if m not in seen and m not in _dead][:3]
+                if extra:
+                    queue += extra
+                    seen.update(extra)
+                    errors.append("Also trying models this key reports as available: " + ", ".join(extra))
+        return None
+
+    answer = run(list(ordered), allow_discovery=True)
+    if answer is None and busy and time.monotonic() + 8 <= deadline:
+        time.sleep(4)                                            # demand spikes are usually short
+        errors.append("Every model was busy; waited a few seconds and tried the busy ones once more.")
+        answer = run([m for m in ordered + sorted(busy) if m in busy and m not in _dead], allow_discovery=False)
+    if answer is not None:
+        _last_good = answer["model"]
+        return answer
+
     avail = available_models(client)
     if avail:
         errors.append("Models this key reports as available: " + ", ".join(avail[:10]))
-    message = _friendly_error(Exception(errors[0] if errors else "unknown error"))
-    if tried:
-        message += f" Tried: {', '.join(sorted(tried))}."
-        message += (f" Models this key can use include: {', '.join(avail[:5])}. Set GEMINI_MODEL in the app secrets to one of them."
-                    if avail else " The key could not list any usable model either, so it may be restricted or from another project.")
+    if all_transient and errors:
+        message = ("Google's free Gemini service is busy right now: every model replied \"high demand\" or timed out. "
+                   "This is temporary and not a problem with the app or the key. Please ask the question again in a minute. "
+                   "Everything else in the app keeps working.")
+    else:
+        message = _friendly_error(Exception(errors[0] if errors else "unknown error"))
+        if seen:
+            message += f" Tried: {', '.join(sorted(seen))}."
+            message += (f" Models this key can use include: {', '.join(avail[:5])}. Set GEMINI_MODEL in the app secrets to one of them."
+                        if avail else " The key could not list any usable model either, so it may be restricted or from another project.")
     return {"text": None, "error": message, "calls": box.calls, "pending_task": None, "model": None, "details": errors}
 
 
-def _converse(client, types, model, contents, config, box) -> str:
+def _round(client, types, model, contents, config, on_text):
+    """One exchange with the model. Returns (text, function_calls, model_content).
+
+    Streams when the caller wants live text and the client supports it, so the answer
+    appears as it is written instead of after the whole response is ready.
+    """
+    if on_text is not None and hasattr(client.models, "generate_content_stream"):
+        parts, calls, text = [], [], []
+        for chunk in client.models.generate_content_stream(model=model, contents=contents, config=config):
+            cand = (getattr(chunk, "candidates", None) or [None])[0]
+            if cand is not None and getattr(cand, "content", None) is not None and cand.content.parts:
+                parts.extend(cand.content.parts)          # kept unchanged, so thought signatures survive
+            calls.extend(getattr(chunk, "function_calls", None) or [])
+            try:
+                delta = chunk.text
+            except Exception:
+                delta = None
+            if delta:
+                text.append(delta)
+                on_text(delta)
+        return "".join(text), calls, types.Content(role="model", parts=parts)
+    resp = client.models.generate_content(model=model, contents=contents, config=config)
+    text = None
+    try:
+        text = resp.text
+    except Exception:
+        text = None
+    if text and on_text is not None:
+        on_text(text)
+    return text, list(resp.function_calls or []), resp.candidates[0].content
+
+
+def _converse(client, types, model, contents, config, box, on_text=None) -> str:
     contents = list(contents)
-    resp = None
+    text = None
     for _ in range(MAX_TOOL_ROUNDS):
-        resp = client.models.generate_content(model=model, contents=contents, config=config)
-        calls = resp.function_calls or []
+        text, calls, model_content = _round(client, types, model, contents, config, on_text)
         if not calls:
             break
-        contents.append(resp.candidates[0].content)  # unchanged, so thought signatures are preserved
+        contents.append(model_content)               # unchanged, so thought signatures are preserved
         parts = []
         for fc_ in calls:
             result = run_tool(box, fc_.name, dict(fc_.args or {}))
             parts.append(types.Part(function_response=types.FunctionResponse(name=fc_.name, response={"result": result}, id=getattr(fc_, "id", None))))
         contents.append(types.Content(role="user", parts=parts))
-    text = None
-    try:
-        text = resp.text if resp is not None else None
-    except Exception:
-        text = None
     if not text:
         text = "I retrieved the data but could not compose an answer. Please rephrase the question or ask about one campaign at a time."
     return text

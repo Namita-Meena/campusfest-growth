@@ -17,6 +17,7 @@ import json
 import os
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
@@ -165,7 +166,13 @@ def load_all(force=False) -> dict:
     """All workspace tables as lists of dicts (cached for a few seconds, cleared on every write)."""
     if force or _cache["data"] is None or time.time() - _cache["at"] > _CACHE_SECONDS:
         store = get_store()
-        data = {t: store.fetch(t) for t in PK}
+        tables = list(PK)
+        if isinstance(store, SupabaseStore):
+            # Six network round trips to the database region, so fetch them at the same time.
+            with ThreadPoolExecutor(max_workers=len(tables)) as pool:
+                data = dict(zip(tables, pool.map(store.fetch, tables)))
+        else:
+            data = {t: store.fetch(t) for t in tables}
         data["settings"] = {r["key"]: r["value"] for r in data["settings"]}
         _cache.update(at=time.time(), data=data)
     return _cache["data"]

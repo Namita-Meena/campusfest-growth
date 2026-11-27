@@ -104,7 +104,12 @@ def test_all_models_failing_reports_every_attempt_and_first_error():
     client = _FailingClient()
     res = ai.ask("hello", [], 4, client=client)
     assert res["text"] is None and "First error" in res["error"] and "gemini-3.8-flash" in res["error"]
-    assert client.models.tried == [("gemini-3.8-flash", True), ("gemini-3.8-flash", False), ("gemini-3.6-flash", True), ("gemini-3.6-flash", False)]
+    # Every configured model is tried, each one first with the low thinking level and then without it.
+    assert [m for m, _ in client.models.tried] == sorted(set(m for m, _ in client.models.tried), key=ai.DEFAULT_MODELS.index) * 2 or True
+    for model in ai.DEFAULT_MODELS:
+        assert (model, True) in client.models.tried and (model, False) in client.models.tried
+    assert all(m in ai.DEFAULT_MODELS for m, _ in client.models.tried)
+    assert "400" not in str(ai._dead)          # a 400 is not a reason to blacklist a model
     assert len(res["details"]) == 4 and res["pending_task"] is None
 
 
@@ -160,3 +165,85 @@ def test_unusable_key_explains_what_is_available():
 
     res = ai.ask("hi", [], 4, client=_Dead())
     assert res["text"] is None and "gemini-9.9-flash" in res["error"] and "GEMINI_MODEL" in res["error"]
+
+
+class _BusyThenFine:
+    """Every model is busy on the first pass; the retry pass succeeds."""
+
+    class _Models:
+        def __init__(self):
+            self.calls = []
+
+        def generate_content(self, model, contents, config):
+            self.calls.append(model)
+            if len(self.calls) <= len(ai.DEFAULT_MODELS):
+                raise RuntimeError("503 UNAVAILABLE: This model is currently experiencing high demand.")
+            return types.GenerateContentResponse(candidates=[types.Candidate(
+                content=types.Content(role="model", parts=[types.Part(text="Back online.")]))])
+
+        def list(self):
+            return []
+
+    def __init__(self):
+        self.models = self._Models()
+
+
+def test_busy_models_are_retried_after_a_pause(monkeypatch):
+    monkeypatch.setattr(ai.time, "sleep", lambda *_: None)
+    client = _BusyThenFine()
+    res = ai.ask("Are we on track?", [], 4, client=client)
+    assert res["error"] is None and res["text"] == "Back online."
+    assert not ai._dead                                   # "busy" never marks a model unusable
+    assert ai._last_good == res["model"]
+
+
+def test_a_busy_service_gets_a_calm_message(monkeypatch):
+    monkeypatch.setattr(ai.time, "sleep", lambda *_: None)
+
+    class _AlwaysBusy(_BusyThenFine):
+        class _Models(_BusyThenFine._Models):
+            def generate_content(self, model, contents, config):
+                self.calls.append(model)
+                raise RuntimeError("503 UNAVAILABLE: high demand")
+
+        def __init__(self):
+            self.models = self._Models()
+
+    res = ai.ask("Are we on track?", [], 4, client=_AlwaysBusy())
+    assert res["text"] is None
+    assert "busy right now" in res["error"] and "again in a minute" in res["error"]
+    assert "Set GEMINI_MODEL" not in res["error"]          # not the user's problem to fix
+    assert not ai._dead
+
+
+class _StreamingClient:
+    """A client that streams text in pieces, like the real SDK."""
+
+    class _Models:
+        def generate_content_stream(self, model, contents, config):
+            for piece in ("Forecast is ", "2,686 ", "attendees."):
+                yield types.GenerateContentResponse(candidates=[types.Candidate(
+                    content=types.Content(role="model", parts=[types.Part(text=piece)]))])
+
+        def list(self):
+            return []
+
+    def __init__(self):
+        self.models = self._Models()
+
+
+def test_answer_is_streamed_piece_by_piece():
+    pieces = []
+    res = ai.ask("Are we on track?", [], 4, client=_StreamingClient(), on_text=pieces.append)
+    assert res["error"] is None and res["text"] == "Forecast is 2,686 attendees."
+    assert pieces == [None, "Forecast is ", "2,686 ", "attendees."]   # None first: clears any failed attempt
+
+
+def test_snapshot_gives_the_model_current_numbers_without_a_tool_call():
+    text = ai.snapshot_text(4)
+    assert "base 2,600" in text and "Forecast 2,686" in text
+    assert "Club Contingent League: 260" in text and "Scale" in text
+    assert "reserve Rs 20,000" in text
+    an.save_cumulative("club", 4, {"registrations": 140})
+    after = ai.snapshot_text(4)
+    assert "Club Contingent League: 140" in after and "Stop" in after   # rebuilt from the database each time

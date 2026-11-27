@@ -2,7 +2,10 @@
 
 Growth command centre for **CampusFest Bengaluru 2027** (Challenge A: Attendee Growth), built for the RISA Labs Growth APM assignment by **Namita Meena, IIT Kharagpur**.
 
-**Public app:** `ADD-YOUR-STREAMLIT-URL-HERE` (replace after deployment)
+**Public app:** https://campusfest-growth-namita.streamlit.app  
+**Source:** https://github.com/Namita-Meena/campusfest-growth
+
+No sign-in, no installation and no API key of your own: open the link and use it. A five-minute walkthrough is in [`docs/DEMO_GUIDE.md`](docs/DEMO_GUIDE.md).
 
 It is one product with five working parts and a reference section:
 
@@ -169,11 +172,21 @@ Bands are mutually exclusive; below the minimum sample every rule returns **Cont
 - **No arithmetic by the model:** numbers come from the tools. No model-generated code or SQL is executed.
 - **No writes by the model:** `draft_task` only prepares a draft. The page shows it with Approve and Reject buttons; only Approve saves it (source "AI-generated").
 - **Uncertainty:** the data dictionary tool lists what is not available (age, gender, college …), and the system instruction tells the model to say so instead of estimating.
+- **Speed:** three things keep answers quick. The six database tables are fetched concurrently rather than one after another; a compact snapshot of the current state (targets, forecast, funnel, budget, every campaign's pace and recommendation, experiment states, alerts) is built from that read and attached to the system instruction, so ordinary questions are answered without a tool round trip at all; and the answer is streamed, so text appears as it is written instead of after the whole response is ready. Tools are still called for anything outside the snapshot, and the snapshot is rebuilt from the database for every question, so it is never stale.
 - **Transparency:** every answer shows which tools were called.
 
 ## 11. Technology
 
 Streamlit 1.67 · Python · pandas · Plotly · Supabase PostgreSQL (`supabase` client) · Google Gemini (`google-genai`) · pytest. No LangChain, Docker or separate front end.
+
+### Interface: two themes, one switch
+
+The sidebar has a **Dark / Light** switch. It is a single control for the whole app: the choice is held in the browser session, applies to all six pages at once, travels with you from page to page, and is written to the URL (`?theme=light`) so a refreshed tab keeps it.
+
+- **Dark ("console")** — near-black canvas with a fine grid, lime accent and monospace labels, in the spirit of the RISA Labs site. This is the default.
+- **Light ("editorial")** — warm paper, ink-black rules, oversized figures and one burnt-orange accent. Better for long reading and for a projector in a bright room.
+
+How it works: both palettes live in `core/config.py` (`THEMES`). `core/ui.py` turns the active palette into CSS variables and one stylesheet, and every component (page header, focal number, alerts, metric tiles, status labels, charts) reads those variables, so no page hard-codes a colour. Plotly charts are styled from the same palette. Streamlit paints data grids on a canvas that CSS cannot recolour, so when the chosen theme differs from the one Streamlit was started with, the grid is flipped with a CSS filter instead. Text colours in both themes are tested to reach WCAG AA contrast (4.5:1) on their backgrounds, and every status is written as a word as well as shown as a colour.
 
 ### Database (Supabase)
 
@@ -206,7 +219,7 @@ python -m pip install pytest
 python -m pytest -q
 ```
 
-85 automated tests: historical figures re-derived from raw data; every decision boundary, minimum sample and the fraud override; forecast reconciliation to 2,600 and 3,400; z-test against SciPy reference values; persistence across a restart; reserve double-allocation; input validation; copilot tools reflecting edits; the model loop with a scripted fake model; headless rendering of every page at weeks 1, 4, 8 and 12; and the recruiter demo through the real forms. See `docs/TEST_REPORT.md` for what was and was not executed, and `docs/DEMO_GUIDE.md` for the walkthrough.
+113 automated tests: historical figures re-derived from raw data; every decision boundary, minimum sample and the fraud override; forecast reconciliation to 2,600 and 3,400; z-test against SciPy reference values; persistence across a restart; reserve double-allocation; input validation; copilot tools reflecting edits; the model loop with a scripted fake model, including falling back to a model the key can actually use, retrying models that reported `503 high demand`, and never blacklisting a model for being busy; headless rendering of every page at weeks 1, 4, 8 and 12 and in both themes; the theme switch (one control, changes every page, survives navigation); contrast of every text colour in both palettes; and the recruiter demo through the real forms. See `docs/TEST_REPORT.md` for what was and was not executed, and `docs/DEMO_GUIDE.md` for the walkthrough.
 
 ## 15. Known limitations
 
@@ -215,7 +228,7 @@ python -m pytest -q
 - Experiment inputs are entered as counts; there is no live integration with ticketing, WhatsApp or UPI (out of scope by design).
 - No login: the public demo is a single shared workspace. A production version would add authentication and per-user audit trails.
 - Budget-to-registration elasticity in the simulator is an explicit assumption, off by default.
-- The copilot depends on the Gemini API quota of the configured key. If the quota is exhausted it says so; the rest of the app keeps working.
+- The copilot depends on Google's free Gemini tier. During demand spikes every model can return `503 high demand` or `504 deadline exceeded`; the app then tries the other models it can reach, pauses, retries the busy ones, and finally says the service is busy and offers an "Ask the same question again" button. This was observed on 26 November 2026 and cleared on its own. The rest of the app does not depend on the API.
 - Attribution is by recorded source, which is not proof of incrementality.
 
 ## 16. AI assistance disclosure

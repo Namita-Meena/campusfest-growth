@@ -67,3 +67,12 @@ def test_supabase_store_uses_valid_client_calls():
     assert store.client.table("tasks").upsert([{"id": "x"}], on_conflict="id") is not None
     assert store.client.table("tasks").delete().in_("id", ["x"]) is not None
     assert store.client.table("tasks").delete().neq("id", "__never__") is not None
+
+
+def test_copilot_page_with_a_key_shows_the_connection_check(monkeypatch):
+    """The AI connection check must render cleanly (a bare expression there once dumped Streamlit internals)."""
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-key-for-render-test")
+    at = _page("copilot")
+    labels = [b.label for b in at.button]
+    assert any("Check which models" in l for l in labels)
+    assert not any("DeltaGenerator" in (m.value or "") for m in at.markdown)

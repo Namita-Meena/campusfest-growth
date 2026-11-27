@@ -15,5 +15,8 @@ from core import database as db
 @pytest.fixture(autouse=True)
 def fresh_workspace():
     """Every test starts from the seeded week-4 demo scenario in an in-memory database."""
+    from core import ai_copilot as ai
+    ai._discovered, ai._last_good = [], ""
+    ai._dead.clear()
     db.use_store(db.SQLiteStore(":memory:"))
     yield

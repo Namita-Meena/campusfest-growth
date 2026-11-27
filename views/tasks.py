@@ -48,7 +48,8 @@ if view:
                         "Created": str(t.get("created_at") or "")[:10]} for t in view])
 
     def colour(v):
-        return {"Completed": f"color:{C.GREEN};font-weight:600", "Blocked": f"color:{C.RED};font-weight:600", "In Progress": f"color:{C.BLUE};font-weight:600"}.get(v, "")
+        return {"Completed": f"color:{ui.grid_tone('green')};font-weight:600", "Blocked": f"color:{ui.grid_tone('red')};font-weight:600",
+                "In Progress": f"color:{ui.grid_tone('blue')};font-weight:600"}.get(v, "")
 
     st.dataframe(df.style.map(colour, subset=["Status"]), hide_index=True, width="stretch")
 else:
